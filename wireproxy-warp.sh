@@ -11,7 +11,7 @@ ACCOUNT_FILE=$STATE_DIR/account.json
 SERVICE_NAME=wireproxy-warp
 SERVICE_FILE=/etc/init.d/$SERVICE_NAME
 WIREPROXY_BIN=/usr/local/bin/wireproxy-warp
-MANAGER_BIN=/usr/local/bin/wireproxy-warpctl
+MANAGER_BIN=/usr/local/bin/warp
 SCRIPT_URL=${WIREPROXY_SCRIPT_URL:-https://raw.githubusercontent.com/BlackCatCmx/alpine-wireproxy/main/wireproxy-warp.sh}
 DEFAULT_PORT=41360
 
@@ -421,7 +421,7 @@ menu_proxy() {
     done
 }
 
-if [ "$SCRIPT_NAME" = wireproxy-warpctl ]; then
+if [ "$SCRIPT_NAME" = warp ]; then
     ACTION=menu
 else
     ACTION=install

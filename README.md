@@ -32,12 +32,12 @@ wget -qO /root/wireproxy-warp-install.sh https://raw.githubusercontent.com/Black
 安装后使用管理入口：
 
 ```sh
-wireproxy-warpctl          # 打开菜单
-wireproxy-warpctl status
-wireproxy-warpctl restart
-wireproxy-warpctl switch 4
-wireproxy-warpctl switch dual
-wireproxy-warpctl uninstall
+warp          # 打开菜单
+warp status
+warp restart
+warp switch 4
+warp switch dual
+warp uninstall
 ```
 
 菜单提供状态查看、重启服务、切换 IPv4-only、切换双栈和卸载。切换会实际修改 WireProxy 的 `Address` 与 `AllowedIPs`，不会重新注册 WARP 账户。
@@ -55,7 +55,7 @@ curl --fail --proxy socks5://127.0.0.1:41360 \
 ## 卸载
 
 ```sh
-wireproxy-warpctl uninstall
+warp uninstall
 ```
 
 卸载只移除本项目创建的服务、管理入口、WireProxy 二进制和 `/etc/wireproxy-warp`。
