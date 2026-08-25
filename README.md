@@ -14,6 +14,8 @@ wget -qO /root/wireproxy-warp-install.sh https://raw.githubusercontent.com/Black
 
 `sh wireproxy-warp.sh` 的意思是“让 `sh` 执行当前目录中已经存在的文件”，不是 Alpine 自带命令。
 
+安装器在服务和 SOCKS5 端口启动后立即返回，不等待首次 WARP 握手；新注册账户的 WARP 出站可能还需要几分钟，WireProxy 会在后台自动重试。
+
 参数：
 
 ```text
@@ -41,6 +43,8 @@ warp uninstall
 ```
 
 菜单提供状态查看、重启服务、切换 IPv4-only、切换双栈和卸载。切换会实际修改 WireProxy 的 `Address` 与 `AllowedIPs`，不会重新注册 WARP 账户。
+
+重启或切换后同样立即返回，首次 WARP 握手继续在后台进行。
 
 ## 代理测试
 
