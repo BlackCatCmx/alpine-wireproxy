@@ -12,8 +12,6 @@ Alpine 不会预装 `wireproxy-warp.sh`。下面的一行命令会下载脚本�
 wget -qO /root/wireproxy-warp-install.sh https://raw.githubusercontent.com/BlackCatCmx/alpine-wireproxy/main/wireproxy-warp.sh && sh /root/wireproxy-warp-install.sh install --stack dual --port 41360 --username proxyuser --password 'change-this-password'
 ```
 
-`sh wireproxy-warp.sh` 的意思是“让 `sh` 执行当前目录中已经存在的文件”，不是 Alpine 自带命令。
-
 安装器在服务和 SOCKS5 端口启动后立即返回，不等待首次 WARP 握手；新注册账户的 WARP 出站可能还需要几分钟，WireProxy 会在后台自动重试。
 
 参数：
