@@ -11,6 +11,8 @@ ACCOUNT_FILE=$STATE_DIR/account.json
 SERVICE_NAME=wireproxy-warp
 SERVICE_FILE=/etc/init.d/$SERVICE_NAME
 WIREPROXY_BIN=/usr/local/bin/wireproxy-warp
+MANAGER_BIN=/usr/local/bin/wireproxy-warpctl
+SCRIPT_URL=${WIREPROXY_SCRIPT_URL:-https://raw.githubusercontent.com/BlackCatCmx/alpine-wireproxy/main/wireproxy-warp.sh}
 DEFAULT_PORT=41360
 
 die() {
@@ -26,7 +28,10 @@ usage() {
     cat <<EOF
 Usage:
   $SCRIPT_NAME install [options]
+  $SCRIPT_NAME menu
   $SCRIPT_NAME status
+  $SCRIPT_NAME restart
+  $SCRIPT_NAME switch 4|dual
   $SCRIPT_NAME uninstall
 
 Install options:
@@ -238,6 +243,7 @@ install_wireproxy() {
     install -m 0755 "$TMP_DIR/extracted/wireproxy" "$WIREPROXY_BIN"
     write_config
     write_service
+    install_manager
 
     rc-update add "$SERVICE_NAME" default >/dev/null || die "failed to enable OpenRC service"
     rc-service "$SERVICE_NAME" start || die "WireProxy failed to start; inspect $CONFIG_FILE"
@@ -255,6 +261,24 @@ install_wireproxy() {
         rc-service "$SERVICE_NAME" restart || die "WireProxy restart failed; inspect $CONFIG_FILE"
         wait_for_warp || die "WireProxy is listening but WARP did not become ready; inspect $CONFIG_FILE"
     fi
+}
+
+install_manager() {
+    manager_source=$TMP_DIR/manager.sh
+
+    case "$0" in
+        /*|./*|../*)
+            if [ -f "$0" ]; then
+                cp "$0" "$manager_source"
+            fi
+            ;;
+    esac
+    if [ ! -s "$manager_source" ]; then
+        curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 8 --max-time 30 \
+            -o "$manager_source" "$SCRIPT_URL" ||
+            die "failed to install the WireProxy management command"
+    fi
+    install -m 0755 "$manager_source" "$MANAGER_BIN"
 }
 
 install_proxy() {
@@ -296,24 +320,113 @@ uninstall_proxy() {
     require_root
     require_alpine_openrc
     stop_service
-    rm -f "$SERVICE_FILE" "$WIREPROXY_BIN"
+    rm -f "$SERVICE_FILE" "$WIREPROXY_BIN" "$MANAGER_BIN"
     rm -rf "$STATE_DIR"
     info "WireProxy WARP local files and service were removed."
 }
 
-ACTION=install
+restart_proxy() {
+    require_root
+    require_alpine_openrc
+    [ -x "$SERVICE_FILE" ] || die "WireProxy WARP is not installed"
+    rc-service "$SERVICE_NAME" restart || die "failed to restart WireProxy WARP"
+    info "WireProxy WARP service restarted."
+}
+
+switch_stack_proxy() {
+    require_root
+    require_alpine_openrc
+    [ -f "$CONFIG_FILE" ] || die "WireProxy WARP is not installed"
+    [ -f "$ACCOUNT_FILE" ] || die "WARP account data is missing"
+
+    address4=$(sed -n 's/.*"v4"[[:space:]]*:[[:space:]]*"\(172\.[^"]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
+    address6=$(sed -n 's/.*"v6"[[:space:]]*:[[:space:]]*"\(2606:[^"]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
+    [ -n "$address4" ] || die "WARP account has no IPv4 address"
+
+    case "$1" in
+        4)
+            new_address=$address4/32
+            new_allowed='0.0.0.0/0'
+            ;;
+        dual)
+            [ -n "$address6" ] || die "WARP account has no IPv6 address"
+            new_address="$address4/32, $address6/128"
+            new_allowed='0.0.0.0/0, ::/0'
+            ;;
+        *)
+            die "stack must be 4 or dual"
+            ;;
+    esac
+
+    sed -i "s#^Address = .*#Address = $new_address#; s#^AllowedIPs = .*#AllowedIPs = $new_allowed#" "$CONFIG_FILE"
+    "$WIREPROXY_BIN" -c "$CONFIG_FILE" -n >/dev/null 2>&1 ||
+        die "updated WireProxy configuration is invalid"
+    rc-service "$SERVICE_NAME" restart || die "failed to restart WireProxy WARP"
+    info "WARP stack switched to $1."
+}
+
+menu_proxy() {
+    require_root
+    require_alpine_openrc
+
+    while :; do
+        printf '%s\n' '' 'WireProxy WARP menu' \
+            '1) Show status' \
+            '2) Restart service' \
+            '3) Switch to IPv4-only' \
+            '4) Switch to dual-stack' \
+            '5) Uninstall' \
+            '0) Exit'
+        printf '%s' 'Select: '
+        IFS= read -r choice || return 0
+        case "$choice" in
+            1) status_proxy ;;
+            2) restart_proxy ;;
+            3) switch_stack_proxy 4 ;;
+            4) switch_stack_proxy dual ;;
+            5) uninstall_proxy; return 0 ;;
+            0) return 0 ;;
+            *) info "Invalid selection." ;;
+        esac
+    done
+}
+
+if [ "$SCRIPT_NAME" = wireproxy-warpctl ]; then
+    ACTION=menu
+else
+    ACTION=install
+fi
 STACK=dual
 PORT=$DEFAULT_PORT
 USERNAME=
 PASSWORD=
+SWITCH_STACK=
 
 if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
     ACTION=$1
     shift
 fi
 
+if [ "$ACTION" = menu ] && [ "$#" -gt 0 ]; then
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+fi
+
 case "$ACTION" in
-    install|status|uninstall) ;;
+    install|menu|status|restart|uninstall) ;;
+    switch)
+        [ "$#" -ge 1 ] || die "switch requires 4 or dual"
+        SWITCH_STACK=$1
+        shift
+        ;;
     -h|--help|help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
 esac
@@ -386,8 +499,17 @@ case "$ACTION" in
         validate_credential "$PASSWORD" password
         install_proxy
         ;;
+    menu)
+        menu_proxy
+        ;;
     status)
         status_proxy
+        ;;
+    restart)
+        restart_proxy
+        ;;
+    switch)
+        switch_stack_proxy "$SWITCH_STACK"
         ;;
     uninstall)
         uninstall_proxy

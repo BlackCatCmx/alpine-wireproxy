@@ -1,50 +1,61 @@
 # Alpine WireProxy WARP
 
-这是一个面向 64MiB Alpine NAT 小鸡的最小化安装脚本：只运行 WireProxy 用户态 WireGuard 客户端，并提供 SOCKS5 WARP 出站，不修改主机全局路由、防火墙或 DNS。
+面向 64 MiB Alpine NAT VPS 的轻量 WARP SOCKS5 出站代理。只运行 WireProxy 用户态 WireGuard，不接管主机全局路由、防火墙或 DNS。
 
-脚本只支持 Alpine Linux + OpenRC + amd64。安装时会：
-
-- 通过 Cloudflare 官方 WARP 注册接口生成临时设备账户；
-- 下载固定版本的 WireProxy amd64 发布包；
-- 创建 OpenRC 服务；
-- 将 SOCKS5 监听在 `0.0.0.0`，并强制要求用户名和密码。
-
-安装依赖仅为 `curl`、`openssl` 和 CA 证书；Alpine 自带的 BusyBox 提供其余工具。不安装 `wireguard-tools`、`wgcf`、`bash`、iptables、dnsmasq 或全局 WARP 客户端。
+支持 Alpine Linux、OpenRC、amd64；默认监听 `0.0.0.0`，鉴权始终必填。
 
 ## 安装
 
+Alpine 不会预装 `wireproxy-warp.sh`。下面的一行命令会下载脚本并立即执行：
+
 ```sh
-sh wireproxy-warp.sh install \
-  --stack dual \
-  --port 41360 \
-  --username proxyuser \
-  --password 'change-this-password'
+wget -qO /root/wireproxy-warp-install.sh https://raw.githubusercontent.com/BlackCatCmx/alpine-wireproxy/main/wireproxy-warp.sh && sh /root/wireproxy-warp-install.sh install --stack dual --port 41360 --username proxyuser --password 'change-this-password'
 ```
 
-`--stack 4` 或 `--ipv4-only` 只经 WARP 访问 IPv4；`--stack dual` 或 `--dual-stack` 同时经 WARP 访问 IPv4 和 IPv6。默认端口是 `41360`，默认监听地址始终是 `0.0.0.0`，所以 `--username` 和 `--password` 不能省略。
+`sh wireproxy-warp.sh` 的意思是“让 `sh` 执行当前目录中已经存在的文件”，不是 Alpine 自带命令。
 
-密码不能包含空白字符、`#` 或 `=`，这是为了避免破坏 WireProxy 配置语法。
+参数：
 
-## 管理与测试
-
-```sh
-sh wireproxy-warp.sh status
-rc-service wireproxy-warp restart
-rc-service wireproxy-warp stop
+```text
+--stack 4|dual       WARP 出站类型，默认 dual
+--ipv4-only          等同于 --stack 4
+--dual-stack         等同于 --stack dual
+--port PORT          SOCKS5 端口，默认 41360
+--username USER      必填用户名
+--password PASSWORD  必填密码
 ```
 
-在目标 Alpine 主机本机验证 SOCKS5：
+密码不能包含空白字符、`#` 或 `=`。
+
+## 管理
+
+安装后使用管理入口：
 
 ```sh
-curl --fail --socks5-hostname 127.0.0.1:41360 \
+wireproxy-warpctl          # 打开菜单
+wireproxy-warpctl status
+wireproxy-warpctl restart
+wireproxy-warpctl switch 4
+wireproxy-warpctl switch dual
+wireproxy-warpctl uninstall
+```
+
+菜单提供状态查看、重启服务、切换 IPv4-only、切换双栈和卸载。切换会实际修改 WireProxy 的 `Address` 与 `AllowedIPs`，不会重新注册 WARP 账户。
+
+## 代理测试
+
+```sh
+curl --fail --proxy socks5://127.0.0.1:41360 \
   --proxy-user 'proxyuser:change-this-password' \
   https://www.cloudflare.com/cdn-cgi/trace
 ```
 
+`socks5` 由客户端解析域名，`socks5h` 由代理解析域名。IPv4-only 客户端如果本地 DNS 返回 AAAA，应强制使用 IPv4；双栈两种方式都支持。
+
 ## 卸载
 
 ```sh
-sh wireproxy-warp.sh uninstall
+wireproxy-warpctl uninstall
 ```
 
-卸载只删除本脚本创建的 OpenRC 服务、WireProxy 可执行文件和 `/etc/wireproxy-warp`；它不会改动主机全局网络配置。
+卸载只移除本项目创建的服务、管理入口、WireProxy 二进制和 `/etc/wireproxy-warp`。
