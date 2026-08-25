@@ -12,7 +12,7 @@ Alpine 不会预装 `wireproxy-warp.sh`。下面的一行命令会下载脚本�
 wget -qO /root/wireproxy-warp-install.sh https://raw.githubusercontent.com/BlackCatCmx/alpine-wireproxy/main/wireproxy-warp.sh && sh /root/wireproxy-warp-install.sh install --stack dual --port 41360 --username proxyuser --password 'change-this-password'
 ```
 
-安装器会先通过 Cloudflare 下发的 IPv4 Endpoint 做真实 WARP 代理检测；IPv4 失败时自动改用 IPv6 Endpoint 并重试。两个 Endpoint 都失败时安装会明确报错。检测按顺序执行，只运行一个 WireProxy 进程，不增加安装后的常驻内存。
+安装器启动 WireProxy 后会立即返回，并在后台依次检测 Cloudflare 下发的 IPv4、IPv6 Endpoint。新 WARP 账户可能需要几分钟才能可用；检测成功后自动保留可用 Endpoint 并退出，连续数分钟仍失败也会记录结果并退出，不会留下常驻检测进程。
 
 参数：
 
@@ -34,13 +34,17 @@ wget -qO /root/wireproxy-warp-install.sh https://raw.githubusercontent.com/Black
 ```sh
 warp          # 打开菜单
 warp status
+warp test
+warp retry
 warp restart
 warp switch 4
 warp switch dual
 warp uninstall
 ```
 
-菜单提供状态查看、重启服务、切换 IPv4-only、切换双栈和卸载。切换会实际修改 WireProxy 的 `Address` 与 `AllowedIPs`，不会重新注册 WARP 账户。
+`warp status` 只读取服务、当前 Endpoint 和后台检测状态，不发起网络请求，也不修改配置。`warp test` 通过本机 SOCKS5 做一次真实的 `warp=on` 检测，但不修改配置。`warp retry` 使用现有账户在后台重新检测 IPv4、IPv6 Endpoint，不重新下载、注册账户或生成密钥。
+
+菜单还提供重启服务、切换 IPv4-only、切换双栈和卸载。切换会实际修改 WireProxy 的 `Address` 与 `AllowedIPs`，不会重新注册 WARP 账户。
 
 重启或切换不会改变安装时选出的可用 Endpoint。
 

@@ -14,6 +14,12 @@ WIREPROXY_BIN=/usr/local/bin/wireproxy-warp
 MANAGER_BIN=/usr/local/bin/warp
 SCRIPT_URL=${WIREPROXY_SCRIPT_URL:-https://raw.githubusercontent.com/BlackCatCmx/alpine-wireproxy/main/wireproxy-warp.sh}
 DEFAULT_PORT=41360
+SELECT_PID_FILE=/run/wireproxy-warp-select.pid
+SELECT_LOCK_DIR=/run/wireproxy-warp-select.lock
+SELECT_STATUS_FILE=$STATE_DIR/endpoint-selection.status
+SELECT_LOG_FILE=$STATE_DIR/endpoint-selection.log
+SELECT_ROUNDS=8
+SELECT_RETRY_DELAY=15
 
 die() {
     printf '%s\n' "ERROR: $*" >&2
@@ -30,6 +36,8 @@ Usage:
   $SCRIPT_NAME install [options]
   $SCRIPT_NAME menu
   $SCRIPT_NAME status
+  $SCRIPT_NAME test
+  $SCRIPT_NAME retry
   $SCRIPT_NAME restart
   $SCRIPT_NAME switch 4|dual
   $SCRIPT_NAME uninstall
@@ -104,6 +112,28 @@ stop_service() {
     rc-update del "$SERVICE_NAME" default >/dev/null 2>&1 || true
 }
 
+selector_is_running() {
+    selector_pid=$1
+    [ -n "$selector_pid" ] && [ -r "/proc/$selector_pid/cmdline" ] || return 1
+    tr '\000' ' ' < "/proc/$selector_pid/cmdline" | grep -Fq "$MANAGER_BIN _select"
+}
+
+stop_endpoint_selection() {
+    if [ -r "$SELECT_PID_FILE" ]; then
+        selector_pid=$(sed -n '1p' "$SELECT_PID_FILE")
+        if selector_is_running "$selector_pid"; then
+            kill "$selector_pid" 2>/dev/null || true
+            wait_count=0
+            while selector_is_running "$selector_pid" && [ "$wait_count" -lt 10 ]; do
+                sleep 1
+                wait_count=$((wait_count + 1))
+            done
+        fi
+    fi
+    rm -f "$SELECT_PID_FILE"
+    rmdir "$SELECT_LOCK_DIR" 2>/dev/null || true
+}
+
 generate_keypair() {
     key_file=$1
     openssl genpkey -algorithm X25519 -outform DER -out "$key_file" >/dev/null 2>&1 ||
@@ -168,19 +198,11 @@ extract_account_values() {
 }
 
 warp_proxy_ready() {
-    attempt=1
-    while [ "$attempt" -le 2 ]; do
-        if curl --fail --silent --connect-timeout 5 --max-time 8 \
-            --proxy "socks5://127.0.0.1:$PORT" \
-            --proxy-user "$USERNAME:$PASSWORD" \
-            https://1.1.1.1/cdn-cgi/trace 2>/dev/null |
-            grep -q '^warp=on$'; then
-            return 0
-        fi
-        attempt=$((attempt + 1))
-        [ "$attempt" -gt 2 ] || sleep 2
-    done
-    return 1
+    curl --fail --silent --connect-timeout 5 --max-time 8 \
+        --proxy "socks5://127.0.0.1:$PORT" \
+        --proxy-user "$USERNAME:$PASSWORD" \
+        https://1.1.1.1/cdn-cgi/trace 2>/dev/null |
+        grep -q '^warp=on$'
 }
 
 set_peer_endpoint() {
@@ -190,26 +212,94 @@ set_peer_endpoint() {
         die "generated WireProxy endpoint configuration is invalid"
 }
 
-select_working_endpoint() {
-    info "Testing Cloudflare WARP over the IPv4 endpoint..."
+load_proxy_values() {
+    [ -f "$CONFIG_FILE" ] || die "WireProxy WARP is not installed"
+    PORT=$(sed -n 's/^BindAddress[[:space:]]*=[[:space:]]*.*:\([0-9][0-9]*\)$/\1/p' "$CONFIG_FILE" | head -n 1)
+    USERNAME=$(sed -n 's/^Username[[:space:]]*=[[:space:]]*//p' "$CONFIG_FILE" | head -n 1)
+    PASSWORD=$(sed -n 's/^Password[[:space:]]*=[[:space:]]*//p' "$CONFIG_FILE" | head -n 1)
+    [ -n "$PORT" ] && [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] ||
+        die "WireProxy SOCKS5 configuration is incomplete"
+}
+
+load_account_endpoints() {
+    [ -f "$ACCOUNT_FILE" ] || die "WARP account data is missing"
+    ENDPOINT4=$(sed -n 's/.*"endpoint"[[:space:]]*:[[:space:]]*{[^}]*"v4"[[:space:]]*:[[:space:]]*"\([0-9.]*\):[0-9]*".*/\1:2408/p' "$ACCOUNT_FILE" | head -n 1)
+    ENDPOINT6=$(sed -n 's/.*"endpoint"[[:space:]]*:[[:space:]]*{[^}]*"v6"[[:space:]]*:[[:space:]]*"\[\([^]]*\)\]:[0-9]*".*/[\1]:2408/p' "$ACCOUNT_FILE" | head -n 1)
+    [ -n "$ENDPOINT4" ] || die "WARP account has no IPv4 endpoint"
+}
+
+write_selection_status() {
+    printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" > "$SELECT_STATUS_FILE"
+}
+
+try_endpoint() {
+    endpoint=$1
+    transport=$2
+    current_endpoint=$(sed -n 's/^Endpoint[[:space:]]*=[[:space:]]*//p' "$CONFIG_FILE" | head -n 1)
+    if [ "$current_endpoint" != "$endpoint" ]; then
+        set_peer_endpoint "$endpoint"
+        rc-service "$SERVICE_NAME" restart >/dev/null 2>&1 || return 1
+        sleep 1
+    fi
     if warp_proxy_ready; then
-        WARP_TRANSPORT=IPv4
+        write_selection_status "success transport=$transport endpoint=$endpoint"
         return 0
     fi
+    return 1
+}
 
-    [ -n "$ENDPOINT6" ] ||
-        die "the IPv4 WARP endpoint failed and registration provided no IPv6 endpoint"
+run_endpoint_selection() {
+    require_root
+    require_alpine_openrc
+    load_proxy_values
+    load_account_endpoints
+    trap 'selection_code=$?; if [ "$selection_code" -ne 0 ]; then write_selection_status "failed worker-exit=$selection_code; see $SELECT_LOG_FILE"; fi; rm -f "$SELECT_PID_FILE"; rmdir "$SELECT_LOCK_DIR" 2>/dev/null || true' EXIT
+    trap 'exit 1' INT TERM
 
-    info "IPv4 WARP endpoint failed; retrying over the IPv6 endpoint..."
-    set_peer_endpoint "$ENDPOINT6"
-    rc-service "$SERVICE_NAME" restart || die "failed to restart WireProxy with the IPv6 endpoint"
-    sleep 1
-    if warp_proxy_ready; then
-        WARP_TRANSPORT=IPv6
-        return 0
+    round=1
+    while [ "$round" -le "$SELECT_ROUNDS" ]; do
+        write_selection_status "running round=$round/$SELECT_ROUNDS transport=IPv4"
+        if try_endpoint "$ENDPOINT4" IPv4; then
+            exit 0
+        fi
+        if [ -n "$ENDPOINT6" ]; then
+            write_selection_status "running round=$round/$SELECT_ROUNDS transport=IPv6"
+            if try_endpoint "$ENDPOINT6" IPv6; then
+                exit 0
+            fi
+        fi
+        round=$((round + 1))
+        [ "$round" -gt "$SELECT_ROUNDS" ] || sleep "$SELECT_RETRY_DELAY"
+    done
+
+    write_selection_status "failed after=$SELECT_ROUNDS-rounds; run 'warp retry' to try again"
+    exit 0
+}
+
+start_endpoint_selection() {
+    require_root
+    require_alpine_openrc
+    load_proxy_values
+    load_account_endpoints
+
+    if [ -r "$SELECT_PID_FILE" ]; then
+        selector_pid=$(sed -n '1p' "$SELECT_PID_FILE")
+        if selector_is_running "$selector_pid"; then
+            info "WARP endpoint selection is already running (PID $selector_pid)."
+            return 0
+        fi
     fi
 
-    die "both IPv4 and IPv6 WARP endpoints failed"
+    rm -f "$SELECT_PID_FILE"
+    rmdir "$SELECT_LOCK_DIR" 2>/dev/null || true
+    mkdir "$SELECT_LOCK_DIR" || die "another WARP endpoint selection is starting"
+    write_selection_status "starting"
+    nohup "$MANAGER_BIN" _select > "$SELECT_LOG_FILE" 2>&1 &
+    selector_pid=$!
+    printf '%s\n' "$selector_pid" > "$SELECT_PID_FILE"
+    info "WARP endpoint selection started in the background (PID $selector_pid)."
+    info "A new WARP account may take a few minutes to become usable."
+    info "Use 'warp status' or 'warp test' later to check it."
 }
 
 download_wireproxy() {
@@ -303,6 +393,7 @@ install_proxy() {
     require_root
     require_alpine_openrc
     install_dependencies
+    stop_endpoint_selection
 
     mkdir -p "$STATE_DIR"
     chmod 700 "$STATE_DIR"
@@ -314,12 +405,11 @@ install_proxy() {
     extract_account_values
     download_wireproxy
     install_wireproxy
-    select_working_endpoint
+    start_endpoint_selection
 
     info "WireProxy WARP SOCKS5 is running."
     info "Listen: 0.0.0.0:$PORT"
     info "Stack: $STACK"
-    info "WARP transport: $WARP_TRANSPORT"
     info "Config: $CONFIG_FILE"
 }
 
@@ -333,12 +423,37 @@ status_proxy() {
     if [ -f "$CONFIG_FILE" ]; then
         sed -n '/^\[Socks5\]/,/^$/p' "$CONFIG_FILE" |
             sed -E 's/^(Username|Password)[[:space:]]*=.*/\1 = <redacted>/'
+        current_endpoint=$(sed -n 's/^Endpoint[[:space:]]*=[[:space:]]*//p' "$CONFIG_FILE" | head -n 1)
+        [ -z "$current_endpoint" ] || info "Endpoint = $current_endpoint"
+    fi
+    if [ -r "$SELECT_PID_FILE" ]; then
+        selector_pid=$(sed -n '1p' "$SELECT_PID_FILE")
+        if selector_is_running "$selector_pid"; then
+            info "Endpoint selection: running (PID $selector_pid)"
+        else
+            info "Endpoint selection: not running (stale PID file)"
+        fi
+    else
+        info "Endpoint selection: not running"
+    fi
+    [ ! -r "$SELECT_STATUS_FILE" ] || info "Last selection result: $(sed -n '1p' "$SELECT_STATUS_FILE")"
+}
+
+test_proxy() {
+    require_root
+    require_alpine_openrc
+    load_proxy_values
+    if warp_proxy_ready; then
+        info "WARP proxy test passed (warp=on)."
+    else
+        die "WARP proxy test failed"
     fi
 }
 
 uninstall_proxy() {
     require_root
     require_alpine_openrc
+    stop_endpoint_selection
     stop_service
     rm -f "$SERVICE_FILE" "$WIREPROXY_BIN" "$MANAGER_BIN"
     rm -rf "$STATE_DIR"
@@ -394,19 +509,23 @@ menu_proxy() {
     while :; do
         printf '%s\n' '' 'WireProxy WARP menu' \
             '1) Show status' \
-            '2) Restart service' \
-            '3) Switch to IPv4-only' \
-            '4) Switch to dual-stack' \
-            '5) Uninstall' \
+            '2) Test WARP proxy' \
+            '3) Retry endpoint selection' \
+            '4) Restart service' \
+            '5) Switch to IPv4-only' \
+            '6) Switch to dual-stack' \
+            '7) Uninstall' \
             '0) Exit'
         printf '%s' 'Select: '
         IFS= read -r choice || return 0
         case "$choice" in
             1) status_proxy ;;
-            2) restart_proxy ;;
-            3) switch_stack_proxy 4 ;;
-            4) switch_stack_proxy dual ;;
-            5) uninstall_proxy; return 0 ;;
+            2) test_proxy ;;
+            3) start_endpoint_selection ;;
+            4) restart_proxy ;;
+            5) switch_stack_proxy 4 ;;
+            6) switch_stack_proxy dual ;;
+            7) uninstall_proxy; return 0 ;;
             0) return 0 ;;
             *) info "Invalid selection." ;;
         esac
@@ -443,7 +562,7 @@ if [ "$ACTION" = menu ] && [ "$#" -gt 0 ]; then
 fi
 
 case "$ACTION" in
-    install|menu|status|restart|uninstall) ;;
+    install|menu|status|test|retry|restart|uninstall|_select) ;;
     switch)
         [ "$#" -ge 1 ] || die "switch requires 4 or dual"
         SWITCH_STACK=$1
@@ -527,6 +646,12 @@ case "$ACTION" in
     status)
         status_proxy
         ;;
+    test)
+        test_proxy
+        ;;
+    retry)
+        start_endpoint_selection
+        ;;
     restart)
         restart_proxy
         ;;
@@ -535,5 +660,8 @@ case "$ACTION" in
         ;;
     uninstall)
         uninstall_proxy
+        ;;
+    _select)
+        run_endpoint_selection
         ;;
 esac
