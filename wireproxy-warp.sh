@@ -223,6 +223,20 @@ install_wireproxy() {
     rc-service "$SERVICE_NAME" start || die "WireProxy failed to start; inspect $CONFIG_FILE"
     sleep 1
     port_is_listening "$PORT" || die "WireProxy started but port $PORT is not listening"
+
+    attempt=1
+    while [ "$attempt" -le 6 ]; do
+        if curl -fsS --max-time 8 \
+            --proxy "socks5h://127.0.0.1:$PORT" \
+            --proxy-user "$USERNAME:$PASSWORD" \
+            https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null |
+            grep -q '^warp=on$'; then
+            return 0
+        fi
+        [ "$attempt" -eq 6 ] || sleep 2
+        attempt=$((attempt + 1))
+    done
+    die "WireProxy is listening but WARP did not become ready; inspect $CONFIG_FILE"
 }
 
 install_proxy() {
