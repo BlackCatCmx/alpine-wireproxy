@@ -93,6 +93,22 @@ port_is_listening() {
     ss -ltnH 2>/dev/null | awk -v port=":$1" '$4 ~ port "$" {found=1} END {exit !found}'
 }
 
+wait_for_warp() {
+    attempt=1
+    while [ "$attempt" -le 6 ]; do
+        if curl $CURL_FAMILY -fsS --max-time 8 \
+            --proxy "socks5://127.0.0.1:$PORT" \
+            --proxy-user "$USERNAME:$PASSWORD" \
+            https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null |
+            grep -q '^warp=on$'; then
+            return 0
+        fi
+        [ "$attempt" -eq 6 ] || sleep 2
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
 stop_service() {
     [ -x "$SERVICE_FILE" ] || return 0
     rc-service "$SERVICE_NAME" stop >/dev/null 2>&1 || true
@@ -227,19 +243,17 @@ install_wireproxy() {
     sleep 1
     port_is_listening "$PORT" || die "WireProxy started but port $PORT is not listening"
 
-    attempt=1
-    while [ "$attempt" -le 6 ]; do
-        if curl -fsS --max-time 8 \
-            --proxy "socks5h://127.0.0.1:$PORT" \
-            --proxy-user "$USERNAME:$PASSWORD" \
-            https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null |
-            grep -q '^warp=on$'; then
-            return 0
-        fi
-        [ "$attempt" -eq 6 ] || sleep 2
-        attempt=$((attempt + 1))
-    done
-    die "WireProxy is listening but WARP did not become ready; inspect $CONFIG_FILE"
+    if [ "$STACK" = 4 ]; then
+        CURL_FAMILY=-4
+    else
+        CURL_FAMILY=
+    fi
+
+    if ! wait_for_warp; then
+        info "WARP handshake was not ready; restarting WireProxy once."
+        rc-service "$SERVICE_NAME" restart || die "WireProxy restart failed; inspect $CONFIG_FILE"
+        wait_for_warp || die "WireProxy is listening but WARP did not become ready; inspect $CONFIG_FILE"
+    fi
 }
 
 install_proxy() {
