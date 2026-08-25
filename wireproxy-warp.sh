@@ -149,12 +149,13 @@ EOF
 extract_account_values() {
     ADDRESS4=$(sed -n 's/.*"v4"[[:space:]]*:[[:space:]]*"\(172\.[^"]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
     ADDRESS6=$(sed -n 's/.*"v6"[[:space:]]*:[[:space:]]*"\(2606:[^"]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
-    ENDPOINT4=$(sed -n 's/.*"v4"[[:space:]]*:[[:space:]]*"\(\([0-9][0-9]*\)\.[0-9.]*:[0-9][0-9]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
+    ENDPOINT4=$(sed -n 's/.*"v4"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\):[0-9][0-9]*".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
     PEER_PUBLIC_KEY=$(sed -n 's/.*"public_key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
 
     [ -n "$ADDRESS4" ] || die "registration response has no WARP IPv4 address"
     [ -n "$ENDPOINT4" ] || die "registration response has no IPv4 WARP endpoint"
     [ -n "$PEER_PUBLIC_KEY" ] || die "registration response has no WARP peer key"
+    ENDPOINT4="$ENDPOINT4:2408"
 
     if [ "$STACK" = dual ] && [ -z "$ADDRESS6" ]; then
         die "dual-stack registration response has no WARP IPv6 address"
