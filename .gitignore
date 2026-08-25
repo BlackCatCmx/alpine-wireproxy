@@ -1,0 +1,8 @@
+temp/
+*.log
+*.tmp
+*.tar
+*.tar.gz
+*.bak
+*.bak.*
+.DS_Store
