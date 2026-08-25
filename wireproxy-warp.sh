@@ -98,6 +98,15 @@ port_is_listening() {
     ss -ltnH 2>/dev/null | awk -v port=":$1" '$4 ~ port "$" {found=1} END {exit !found}'
 }
 
+load_proxy_settings() {
+    PORT=$(sed -n 's/^BindAddress = 0.0.0.0:\([0-9]*\)$/\1/p' "$CONFIG_FILE" | head -n 1)
+    USERNAME=$(sed -n 's/^Username = //p' "$CONFIG_FILE" | head -n 1)
+    PASSWORD=$(sed -n 's/^Password = //p' "$CONFIG_FILE" | head -n 1)
+    [ -n "$PORT" ] || die "WireProxy config has no SOCKS5 port"
+    [ -n "$USERNAME" ] || die "WireProxy config has no SOCKS5 username"
+    [ -n "$PASSWORD" ] || die "WireProxy config has no SOCKS5 password"
+}
+
 wait_for_warp() {
     attempt=1
     while [ "$attempt" -le 18 ]; do
@@ -329,8 +338,28 @@ restart_proxy() {
     require_root
     require_alpine_openrc
     [ -x "$SERVICE_FILE" ] || die "WireProxy WARP is not installed"
-    rc-service "$SERVICE_NAME" restart || die "failed to restart WireProxy WARP"
+    load_proxy_settings
+    if grep -q '^AllowedIPs = .*::/0' "$CONFIG_FILE"; then
+        proxy_stack=dual
+    else
+        proxy_stack=4
+    fi
+    restart_and_wait "$proxy_stack"
     info "WireProxy WARP service restarted."
+}
+
+restart_and_wait() {
+    if [ "$1" = 4 ]; then
+        CURL_FAMILY=-4
+    else
+        CURL_FAMILY=
+    fi
+    rc-service "$SERVICE_NAME" restart || die "failed to restart WireProxy WARP"
+    if ! wait_for_warp; then
+        info "WARP handshake was not ready; restarting WireProxy once."
+        rc-service "$SERVICE_NAME" restart || die "WireProxy restart failed"
+        wait_for_warp || die "WireProxy restarted but WARP is not ready"
+    fi
 }
 
 switch_stack_proxy() {
@@ -361,7 +390,8 @@ switch_stack_proxy() {
     sed -i "s#^Address = .*#Address = $new_address#; s#^AllowedIPs = .*#AllowedIPs = $new_allowed#" "$CONFIG_FILE"
     "$WIREPROXY_BIN" -c "$CONFIG_FILE" -n >/dev/null 2>&1 ||
         die "updated WireProxy configuration is invalid"
-    rc-service "$SERVICE_NAME" restart || die "failed to restart WireProxy WARP"
+    load_proxy_settings
+    restart_and_wait "$1"
     info "WARP stack switched to $1."
 }
 
