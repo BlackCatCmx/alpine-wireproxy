@@ -178,8 +178,11 @@ write_config() {
 
     {
         printf '%s\n' '[Interface]'
-        printf 'Address = %s/32\n' "$ADDRESS4"
-        [ "$STACK" = dual ] && printf 'Address = %s/128\n' "$ADDRESS6"
+        if [ "$STACK" = dual ]; then
+            printf 'Address = %s/32, %s/128\n' "$ADDRESS4" "$ADDRESS6"
+        else
+            printf 'Address = %s/32\n' "$ADDRESS4"
+        fi
         printf 'MTU = 1280\nPrivateKey = %s\n\n' "$PRIVATE_KEY"
         printf '%s\n' '[Peer]'
         printf 'PublicKey = %s\n' "$PEER_PUBLIC_KEY"
