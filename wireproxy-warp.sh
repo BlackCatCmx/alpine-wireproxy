@@ -95,7 +95,7 @@ port_is_listening() {
 
 wait_for_warp() {
     attempt=1
-    while [ "$attempt" -le 6 ]; do
+    while [ "$attempt" -le 12 ]; do
         if curl $CURL_FAMILY -fsS --max-time 8 \
             --proxy "socks5://127.0.0.1:$PORT" \
             --proxy-user "$USERNAME:$PASSWORD" \
@@ -103,7 +103,7 @@ wait_for_warp() {
             grep -q '^warp=on$'; then
             return 0
         fi
-        [ "$attempt" -eq 6 ] || sleep 2
+        [ "$attempt" -eq 12 ] || sleep 2
         attempt=$((attempt + 1))
     done
     return 1
