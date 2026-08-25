@@ -12,7 +12,7 @@ Alpine 不会预装 `wireproxy-warp.sh`。下面的一行命令会下载脚本�
 wget -qO /root/wireproxy-warp-install.sh https://raw.githubusercontent.com/BlackCatCmx/alpine-wireproxy/main/wireproxy-warp.sh && sh /root/wireproxy-warp-install.sh install --stack dual --port 41360 --username proxyuser --password 'change-this-password'
 ```
 
-安装器在服务和 SOCKS5 端口启动后立即返回，不等待首次 WARP 握手；新注册账户的 WARP 出站可能还需要几分钟，WireProxy 会在后台自动重试。
+安装器会先通过 Cloudflare 下发的 IPv4 Endpoint 做真实 WARP 代理检测；IPv4 失败时自动改用 IPv6 Endpoint 并重试。两个 Endpoint 都失败时安装会明确报错。检测按顺序执行，只运行一个 WireProxy 进程，不增加安装后的常驻内存。
 
 参数：
 
@@ -42,7 +42,7 @@ warp uninstall
 
 菜单提供状态查看、重启服务、切换 IPv4-only、切换双栈和卸载。切换会实际修改 WireProxy 的 `Address` 与 `AllowedIPs`，不会重新注册 WARP 账户。
 
-重启或切换后同样立即返回，首次 WARP 握手继续在后台进行。
+重启或切换不会改变安装时选出的可用 Endpoint。
 
 ## 代理测试
 

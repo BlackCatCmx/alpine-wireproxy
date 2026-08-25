@@ -156,6 +156,7 @@ extract_account_values() {
     ADDRESS6=$(sed -n 's/.*"v6"[[:space:]]*:[[:space:]]*"\(2606:[^"]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
     PEER_PUBLIC_KEY=$(sed -n 's/.*"public_key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
     ENDPOINT4=$(sed -n 's/.*"endpoint"[[:space:]]*:[[:space:]]*{[^}]*"v4"[[:space:]]*:[[:space:]]*"\([0-9.]*\):[0-9]*".*/\1:2408/p' "$ACCOUNT_FILE" | head -n 1)
+    ENDPOINT6=$(sed -n 's/.*"endpoint"[[:space:]]*:[[:space:]]*{[^}]*"v6"[[:space:]]*:[[:space:]]*"\[\([^]]*\)\]:[0-9]*".*/[\1]:2408/p' "$ACCOUNT_FILE" | head -n 1)
 
     [ -n "$ADDRESS4" ] || die "registration response has no WARP IPv4 address"
     [ -n "$PEER_PUBLIC_KEY" ] || die "registration response has no WARP peer key"
@@ -164,6 +165,51 @@ extract_account_values() {
     if [ "$STACK" = dual ] && [ -z "$ADDRESS6" ]; then
         die "dual-stack registration response has no WARP IPv6 address"
     fi
+}
+
+warp_proxy_ready() {
+    attempt=1
+    while [ "$attempt" -le 2 ]; do
+        if curl --fail --silent --connect-timeout 5 --max-time 8 \
+            --proxy "socks5://127.0.0.1:$PORT" \
+            --proxy-user "$USERNAME:$PASSWORD" \
+            https://1.1.1.1/cdn-cgi/trace 2>/dev/null |
+            grep -q '^warp=on$'; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -gt 2 ] || sleep 2
+    done
+    return 1
+}
+
+set_peer_endpoint() {
+    endpoint=$1
+    sed -i "s#^Endpoint = .*#Endpoint = $endpoint#" "$CONFIG_FILE"
+    "$WIREPROXY_BIN" -c "$CONFIG_FILE" -n >/dev/null 2>&1 ||
+        die "generated WireProxy endpoint configuration is invalid"
+}
+
+select_working_endpoint() {
+    info "Testing Cloudflare WARP over the IPv4 endpoint..."
+    if warp_proxy_ready; then
+        WARP_TRANSPORT=IPv4
+        return 0
+    fi
+
+    [ -n "$ENDPOINT6" ] ||
+        die "the IPv4 WARP endpoint failed and registration provided no IPv6 endpoint"
+
+    info "IPv4 WARP endpoint failed; retrying over the IPv6 endpoint..."
+    set_peer_endpoint "$ENDPOINT6"
+    rc-service "$SERVICE_NAME" restart || die "failed to restart WireProxy with the IPv6 endpoint"
+    sleep 1
+    if warp_proxy_ready; then
+        WARP_TRANSPORT=IPv6
+        return 0
+    fi
+
+    die "both IPv4 and IPv6 WARP endpoints failed"
 }
 
 download_wireproxy() {
@@ -268,12 +314,13 @@ install_proxy() {
     extract_account_values
     download_wireproxy
     install_wireproxy
+    select_working_endpoint
 
     info "WireProxy WARP SOCKS5 is running."
     info "Listen: 0.0.0.0:$PORT"
     info "Stack: $STACK"
+    info "WARP transport: $WARP_TRANSPORT"
     info "Config: $CONFIG_FILE"
-    info "Initial WARP handshake runs in the background and may take a few minutes."
 }
 
 status_proxy() {
