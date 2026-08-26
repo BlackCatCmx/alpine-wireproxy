@@ -20,6 +20,11 @@ SELECT_STATUS_FILE=$STATE_DIR/endpoint-selection.status
 SELECT_LOG_FILE=$STATE_DIR/endpoint-selection.log
 SELECT_ROUNDS=8
 SELECT_RETRY_DELAY=15
+WATCHDOG_ENABLED_FILE=$STATE_DIR/watchdog.enabled
+WATCHDOG_STATUS_FILE=$STATE_DIR/watchdog.status
+WATCHDOG_INTERVAL=900
+WATCHDOG_PROBE_ATTEMPTS=3
+WATCHDOG_RETRY_DELAY=10
 
 die() {
     printf '%s\n' "ERROR: $*" >&2
@@ -39,6 +44,7 @@ Usage:
   $SCRIPT_NAME test
   $SCRIPT_NAME retry
   $SCRIPT_NAME restart
+  $SCRIPT_NAME watchdog on|off|status
   $SCRIPT_NAME switch 4|dual
   $SCRIPT_NAME uninstall
 
@@ -64,6 +70,7 @@ require_alpine_openrc() {
     [ "$(uname -m)" = x86_64 ] || die "this installer supports amd64 only"
     command -v rc-service >/dev/null 2>&1 || die "OpenRC rc-service was not found"
     command -v rc-update >/dev/null 2>&1 || die "OpenRC rc-update was not found"
+    command -v supervise-daemon >/dev/null 2>&1 || die "OpenRC supervise-daemon was not found"
 }
 
 validate_port() {
@@ -203,6 +210,60 @@ warp_proxy_ready() {
         --proxy-user "$USERNAME:$PASSWORD" \
         https://1.1.1.1/cdn-cgi/trace 2>/dev/null |
         grep -q '^warp=on$'
+}
+
+direct_network_ready() {
+    http_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+        --connect-timeout 5 --max-time 8 \
+        https://cp.cloudflare.com/generate_204 2>/dev/null || true)
+    [ "$http_status" = 204 ]
+}
+
+watchdog_is_enabled() {
+    [ -f "$WATCHDOG_ENABLED_FILE" ]
+}
+
+write_watchdog_status() {
+    printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" > "$WATCHDOG_STATUS_FILE"
+}
+
+run_watchdog_check() {
+    require_root
+    require_alpine_openrc
+
+    watchdog_is_enabled || return 0
+
+    if [ -r "$SELECT_PID_FILE" ]; then
+        selector_pid=$(sed -n '1p' "$SELECT_PID_FILE")
+        if selector_is_running "$selector_pid"; then
+            write_watchdog_status "skipped endpoint-selection-running"
+            return 0
+        fi
+    fi
+
+    load_proxy_values
+    attempt=1
+    while [ "$attempt" -le "$WATCHDOG_PROBE_ATTEMPTS" ]; do
+        if warp_proxy_ready; then
+            write_watchdog_status "healthy"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -gt "$WATCHDOG_PROBE_ATTEMPTS" ] || sleep "$WATCHDOG_RETRY_DELAY"
+    done
+
+    if ! direct_network_ready; then
+        write_watchdog_status "degraded proxy-unavailable direct-network-unavailable no-restart"
+        return 0
+    fi
+
+    write_watchdog_status "unhealthy proxy-unavailable direct-network-ready restart-requested"
+    return 1
+}
+
+record_watchdog_restart() {
+    require_root
+    write_watchdog_status "recovering wireproxy-restart"
 }
 
 set_peer_endpoint() {
@@ -348,8 +409,21 @@ write_service() {
 description="WireProxy WARP SOCKS5 proxy"
 command="$WIREPROXY_BIN"
 command_args="-c $CONFIG_FILE"
-command_background=true
+supervisor=supervise-daemon
 pidfile="/run/$SERVICE_NAME.pid"
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+healthcheck_delay=$WATCHDOG_INTERVAL
+healthcheck_timer=$WATCHDOG_INTERVAL
+
+healthcheck() {
+    "$MANAGER_BIN" _watchdog_check
+}
+
+unhealthy() {
+    "$MANAGER_BIN" _watchdog_restarting
+}
 
 depend() {
     need net
@@ -404,6 +478,9 @@ install_proxy() {
     register_warp_account "$ACCOUNT_FILE"
     extract_account_values
     download_wireproxy
+    : > "$WATCHDOG_ENABLED_FILE"
+    chmod 600 "$WATCHDOG_ENABLED_FILE"
+    write_watchdog_status "enabled awaiting-first-check"
     install_wireproxy
     start_endpoint_selection
 
@@ -437,6 +514,12 @@ status_proxy() {
         info "Endpoint selection: not running"
     fi
     [ ! -r "$SELECT_STATUS_FILE" ] || info "Last selection result: $(sed -n '1p' "$SELECT_STATUS_FILE")"
+    if watchdog_is_enabled; then
+        info "Watchdog: enabled (interval: 15 minutes)"
+    else
+        info "Watchdog: disabled"
+    fi
+    [ ! -r "$WATCHDOG_STATUS_FILE" ] || info "Last watchdog result: $(sed -n '1p' "$WATCHDOG_STATUS_FILE")"
 }
 
 test_proxy() {
@@ -467,6 +550,38 @@ restart_proxy() {
     rc-service "$SERVICE_NAME" restart || die "failed to restart WireProxy WARP"
     info "WireProxy WARP service restarted in background."
     info "Initial WARP handshake may take a few minutes."
+}
+
+watchdog_proxy() {
+    require_root
+    require_alpine_openrc
+    [ -x "$SERVICE_FILE" ] || die "WireProxy WARP is not installed"
+
+    case "$1" in
+        on)
+            : > "$WATCHDOG_ENABLED_FILE"
+            chmod 600 "$WATCHDOG_ENABLED_FILE"
+            write_watchdog_status "enabled awaiting-next-check"
+            info "WireProxy WARP watchdog enabled (interval: 15 minutes)."
+            ;;
+        off)
+            rm -f "$WATCHDOG_ENABLED_FILE"
+            write_watchdog_status "disabled"
+            info "WireProxy WARP watchdog disabled."
+            info "OpenRC process crash recovery remains enabled."
+            ;;
+        status)
+            if watchdog_is_enabled; then
+                info "Watchdog: enabled (interval: 15 minutes)"
+            else
+                info "Watchdog: disabled"
+            fi
+            [ ! -r "$WATCHDOG_STATUS_FILE" ] || info "Last watchdog result: $(sed -n '1p' "$WATCHDOG_STATUS_FILE")"
+            ;;
+        *)
+            die "watchdog action must be on, off, or status"
+            ;;
+    esac
 }
 
 switch_stack_proxy() {
@@ -507,6 +622,13 @@ menu_proxy() {
     require_alpine_openrc
 
     while :; do
+        if watchdog_is_enabled; then
+            watchdog_menu_label='8) Disable watchdog (currently enabled)'
+            watchdog_menu_action=off
+        else
+            watchdog_menu_label='8) Enable watchdog (currently disabled)'
+            watchdog_menu_action=on
+        fi
         printf '%s\n' '' 'WireProxy WARP menu' \
             '1) Show status' \
             '2) Test WARP proxy' \
@@ -515,6 +637,7 @@ menu_proxy() {
             '5) Switch to IPv4-only' \
             '6) Switch to dual-stack' \
             '7) Uninstall' \
+            "$watchdog_menu_label" \
             '0) Exit'
         printf '%s' 'Select: '
         IFS= read -r choice || return 0
@@ -526,6 +649,7 @@ menu_proxy() {
             5) switch_stack_proxy 4 ;;
             6) switch_stack_proxy dual ;;
             7) uninstall_proxy; return 0 ;;
+            8) watchdog_proxy "$watchdog_menu_action" ;;
             0) return 0 ;;
             *) info "Invalid selection." ;;
         esac
@@ -542,6 +666,7 @@ PORT=$DEFAULT_PORT
 USERNAME=
 PASSWORD=
 SWITCH_STACK=
+WATCHDOG_ACTION=status
 
 if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
     ACTION=$1
@@ -562,7 +687,13 @@ if [ "$ACTION" = menu ] && [ "$#" -gt 0 ]; then
 fi
 
 case "$ACTION" in
-    install|menu|status|test|retry|restart|uninstall|_select) ;;
+    install|menu|status|test|retry|restart|uninstall|_select|_watchdog_check|_watchdog_restarting) ;;
+    watchdog)
+        if [ "$#" -gt 0 ]; then
+            WATCHDOG_ACTION=$1
+            shift
+        fi
+        ;;
     switch)
         [ "$#" -ge 1 ] || die "switch requires 4 or dual"
         SWITCH_STACK=$1
@@ -655,6 +786,9 @@ case "$ACTION" in
     restart)
         restart_proxy
         ;;
+    watchdog)
+        watchdog_proxy "$WATCHDOG_ACTION"
+        ;;
     switch)
         switch_stack_proxy "$SWITCH_STACK"
         ;;
@@ -663,5 +797,11 @@ case "$ACTION" in
         ;;
     _select)
         run_endpoint_selection
+        ;;
+    _watchdog_check)
+        run_watchdog_check
+        ;;
+    _watchdog_restarting)
+        record_watchdog_restart
         ;;
 esac
