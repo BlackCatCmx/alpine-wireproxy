@@ -14,6 +14,7 @@ WIREPROXY_BIN=/usr/local/bin/wireproxy-warp
 MANAGER_BIN=/usr/local/bin/warp
 SCRIPT_URL=${WIREPROXY_SCRIPT_URL:-https://raw.githubusercontent.com/BlackCatCmx/alpine-wireproxy/main/wireproxy-warp.sh}
 DEFAULT_PORT=41360
+DNS_ADDRESS=1.1.1.1
 SELECT_PID_FILE=/run/wireproxy-warp-select.pid
 SELECT_LOCK_DIR=/run/wireproxy-warp-select.lock
 SELECT_STATUS_FILE=$STATE_DIR/endpoint-selection.status
@@ -44,6 +45,7 @@ Usage:
   $SCRIPT_NAME test
   $SCRIPT_NAME retry
   $SCRIPT_NAME restart
+  $SCRIPT_NAME dns cloudflare|native
   $SCRIPT_NAME watchdog on|off|status
   $SCRIPT_NAME switch 4|dual
   $SCRIPT_NAME uninstall
@@ -55,6 +57,8 @@ Install options:
   --port PORT          SOCKS5 listen port (default: $DEFAULT_PORT)
   --username USER      Required SOCKS5 username
   --password PASSWORD  Required SOCKS5 password
+  --dns cloudflare|native
+                       DNS mode (default: cloudflare / $DNS_ADDRESS)
 
 The proxy listens on 0.0.0.0 by design. Username and password are mandatory.
 Only amd64 Alpine Linux with OpenRC is supported by this installer.
@@ -87,6 +91,13 @@ validate_credential() {
     if printf '%s' "$value" | grep -q '[[:space:]#=]'; then
         die "$label must not contain whitespace, #, or ="
     fi
+}
+
+validate_dns_mode() {
+    case "$1" in
+        cloudflare|native) ;;
+        *) die "DNS mode must be cloudflare or native" ;;
+    esac
 }
 
 install_dependencies() {
@@ -245,7 +256,7 @@ run_watchdog_check() {
     attempt=1
     while [ "$attempt" -le "$WATCHDOG_PROBE_ATTEMPTS" ]; do
         if warp_proxy_ready; then
-            write_watchdog_status "healthy"
+            write_watchdog_status "healthy socks5"
             return 0
         fi
         attempt=$((attempt + 1))
@@ -386,7 +397,11 @@ write_config() {
         else
             printf 'Address = %s/32\n' "$ADDRESS4"
         fi
-        printf 'MTU = 1280\nPrivateKey = %s\n\n' "$PRIVATE_KEY"
+        printf 'MTU = 1280\nPrivateKey = %s\n' "$PRIVATE_KEY"
+        if [ "$DNS_MODE" = cloudflare ]; then
+            printf 'DNS = %s\n' "$DNS_ADDRESS"
+        fi
+        printf '\n'
         printf '%s\n' '[Peer]'
         printf 'PublicKey = %s\n' "$PEER_PUBLIC_KEY"
         if [ "$STACK" = dual ]; then
@@ -502,6 +517,12 @@ status_proxy() {
             sed -E 's/^(Username|Password)[[:space:]]*=.*/\1 = <redacted>/'
         current_endpoint=$(sed -n 's/^Endpoint[[:space:]]*=[[:space:]]*//p' "$CONFIG_FILE" | head -n 1)
         [ -z "$current_endpoint" ] || info "Endpoint = $current_endpoint"
+        dns_mode=$(current_dns_mode)
+        if [ "$dns_mode" = cloudflare ]; then
+            info "DNS: Cloudflare ($DNS_ADDRESS)"
+        else
+            info "DNS: native system resolver"
+        fi
     fi
     if [ -r "$SELECT_PID_FILE" ]; then
         selector_pid=$(sed -n '1p' "$SELECT_PID_FILE")
@@ -584,6 +605,47 @@ watchdog_proxy() {
     esac
 }
 
+current_dns_mode() {
+    dns_value=$(sed -n 's/^DNS[[:space:]]*=[[:space:]]*//p' "$CONFIG_FILE" | head -n 1)
+    if [ "$dns_value" = "$DNS_ADDRESS" ]; then
+        printf '%s\n' cloudflare
+    else
+        printf '%s\n' native
+    fi
+}
+
+switch_dns_proxy() {
+    require_root
+    require_alpine_openrc
+    [ -f "$CONFIG_FILE" ] || die "WireProxy WARP is not installed"
+    validate_dns_mode "$1"
+
+    new_config=$(mktemp "$STATE_DIR/proxy.conf.XXXXXX") ||
+        die "failed to create temporary DNS configuration"
+    if [ "$1" = cloudflare ]; then
+        awk -v dns="$DNS_ADDRESS" '
+            /^DNS[[:space:]]*=/ { print "DNS = " dns; found=1; next }
+            { print }
+            /^PrivateKey[[:space:]]*=/ && !found { print "DNS = " dns; found=1 }
+        ' "$CONFIG_FILE" > "$new_config"
+    else
+        sed '/^DNS[[:space:]]*=/d' "$CONFIG_FILE" > "$new_config"
+    fi
+    "$WIREPROXY_BIN" -c "$new_config" -n >/dev/null 2>&1 || {
+        rm -f "$new_config"
+        die "updated WireProxy DNS configuration is invalid"
+    }
+    chmod 600 "$new_config"
+    mv "$new_config" "$CONFIG_FILE"
+    rc-service "$SERVICE_NAME" restart || die "failed to restart WireProxy WARP"
+    if [ "$1" = cloudflare ]; then
+        info "DNS switched to Cloudflare ($DNS_ADDRESS)."
+    else
+        info "DNS switched to native system resolver."
+    fi
+    info "Initial WARP handshake runs in the background and may take a few minutes."
+}
+
 switch_stack_proxy() {
     require_root
     require_alpine_openrc
@@ -622,11 +684,23 @@ menu_proxy() {
     require_alpine_openrc
 
     while :; do
+        if [ -f "$CONFIG_FILE" ]; then
+            dns_mode=$(current_dns_mode)
+        else
+            dns_mode=cloudflare
+        fi
+        if [ "$dns_mode" = cloudflare ]; then
+            dns_menu_label='7) Switch DNS to native resolver (currently Cloudflare)'
+            dns_menu_action=native
+        else
+            dns_menu_label='7) Switch DNS to Cloudflare 1.1.1.1 (currently native)'
+            dns_menu_action=cloudflare
+        fi
         if watchdog_is_enabled; then
-            watchdog_menu_label='8) Disable watchdog (currently enabled)'
+            watchdog_menu_label='9) Disable watchdog (currently enabled)'
             watchdog_menu_action=off
         else
-            watchdog_menu_label='8) Enable watchdog (currently disabled)'
+            watchdog_menu_label='9) Enable watchdog (currently disabled)'
             watchdog_menu_action=on
         fi
         printf '%s\n' '' 'WireProxy WARP menu' \
@@ -636,7 +710,8 @@ menu_proxy() {
             '4) Restart service' \
             '5) Switch to IPv4-only' \
             '6) Switch to dual-stack' \
-            '7) Uninstall' \
+            "$dns_menu_label" \
+            '8) Uninstall' \
             "$watchdog_menu_label" \
             '0) Exit'
         printf '%s' 'Select: '
@@ -648,8 +723,9 @@ menu_proxy() {
             4) restart_proxy ;;
             5) switch_stack_proxy 4 ;;
             6) switch_stack_proxy dual ;;
-            7) uninstall_proxy; return 0 ;;
-            8) watchdog_proxy "$watchdog_menu_action" ;;
+            7) switch_dns_proxy "$dns_menu_action" ;;
+            8) uninstall_proxy; return 0 ;;
+            9) watchdog_proxy "$watchdog_menu_action" ;;
             0) return 0 ;;
             *) info "Invalid selection." ;;
         esac
@@ -663,9 +739,11 @@ else
 fi
 STACK=dual
 PORT=$DEFAULT_PORT
+DNS_MODE=cloudflare
 USERNAME=
 PASSWORD=
 SWITCH_STACK=
+DNS_MODE_ACTION=
 WATCHDOG_ACTION=status
 
 if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
@@ -699,6 +777,11 @@ case "$ACTION" in
         SWITCH_STACK=$1
         shift
         ;;
+    dns)
+        [ "$#" -ge 1 ] || die "dns requires cloudflare or native"
+        DNS_MODE_ACTION=$1
+        shift
+        ;;
     -h|--help|help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
 esac
@@ -720,6 +803,15 @@ while [ "$#" -gt 0 ]; do
             ;;
         --dual-stack)
             STACK=dual
+            shift
+            ;;
+        --dns)
+            [ "$#" -ge 2 ] || die "--dns requires cloudflare or native"
+            DNS_MODE=$2
+            shift 2
+            ;;
+        --dns=*)
+            DNS_MODE=${1#*=}
             shift
             ;;
         --port)
@@ -766,6 +858,7 @@ case "$ACTION" in
             4|dual) ;;
             *) die "--stack must be 4 or dual" ;;
         esac
+        validate_dns_mode "$DNS_MODE"
         validate_port "$PORT"
         validate_credential "$USERNAME" username
         validate_credential "$PASSWORD" password
@@ -791,6 +884,9 @@ case "$ACTION" in
         ;;
     switch)
         switch_stack_proxy "$SWITCH_STACK"
+        ;;
+    dns)
+        switch_dns_proxy "$DNS_MODE_ACTION"
         ;;
     uninstall)
         uninstall_proxy
