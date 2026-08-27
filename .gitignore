@@ -1,4 +1,5 @@
 temp/
+/AGENTS.md
 *.log
 *.tmp
 *.tar

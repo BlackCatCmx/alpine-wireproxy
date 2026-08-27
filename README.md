@@ -6,7 +6,7 @@
 
 ## 安装
 
-Alpine 不会预装 `wireproxy-warp.sh`。下面的一行命令会下载脚本并立即执行：
+安装前无需预置脚本，下面的一行命令会从仓库下载当前脚本并立即执行：
 
 ```sh
 wget -qO /root/wireproxy-warp-install.sh https://raw.githubusercontent.com/BlackCatCmx/alpine-wireproxy/main/wireproxy-warp.sh && sh /root/wireproxy-warp-install.sh install --stack dual --port 41360 --username proxyuser --password 'change-this-password'
