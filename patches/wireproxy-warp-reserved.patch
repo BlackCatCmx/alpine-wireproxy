@@ -1,0 +1,184 @@
+diff --git a/config.go b/config.go
+index e2abb58..0000000 100644
+--- a/config.go
++++ b/config.go
+@@ -24,6 +24,7 @@ type PeerConfig struct {
+ // DeviceConfig contains the information to initiate a wireguard connection
+ type DeviceConfig struct {
+ 	SecretKey          string
++	Reserved           [3]byte
+ 	Endpoint           []netip.Addr
+ 	Peers              []PeerConfig
+ 	DNS                []netip.Addr
+@@ -270,6 +271,17 @@ func ParseInterface(cfg *ini.File, device *DeviceConfig) error {
+ 	}
+ 	device.SecretKey = privKey
+ 
++	if sectionKey, err := section.GetKey("Reserved"); err == nil {
++		value, err := base64.StdEncoding.DecodeString(sectionKey.String())
++		if err != nil {
++			return err
++		}
++		if len(value) != len(device.Reserved) {
++			return errors.New("Reserved must decode to exactly 3 bytes")
++		}
++		copy(device.Reserved[:], value)
++	}
++
+ 	dns, err := parseNetIP(section, "DNS")
+ 	if err != nil {
+ 		return err
+diff --git a/config_test.go b/config_test.go
+index 948fbf8..0000000 100644
+--- a/config_test.go
++++ b/config_test.go
+@@ -2,6 +2,7 @@ package wireproxy
+ 
+ import (
+ 	"github.com/go-ini/ini"
++	"reflect"
+ 	"testing"
+ )
+ 
+@@ -85,3 +86,23 @@ Endpoint = 192.200.144.22:51820`
+ 		t.Fatal(err)
+ 	}
+ }
++
++func TestWireguardConfWithReserved(t *testing.T) {
++	const config = `
++[Interface]
++PrivateKey = LAr1aNSNF9d0MjwUgAVC4020T0N/E5NUtqVv5EnsSz0=
++Address = 172.16.0.2/32
++Reserved = OH+u
++`
++	var cfg DeviceConfig
++	iniData, err := loadIniConfig(config)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = ParseInterface(iniData, &cfg); err != nil {
++		t.Fatal(err)
++	}
++	if want := [3]byte{56, 127, 174}; !reflect.DeepEqual(cfg.Reserved, want) {
++		t.Fatalf("Reserved = %v, want %v", cfg.Reserved, want)
++	}
++}
+diff --git a/reserved_bind_test.go b/reserved_bind_test.go
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/reserved_bind_test.go
+@@ -0,0 +1,57 @@
++package wireproxy
++
++import (
++	"testing"
++
++	"golang.zx2c4.com/wireguard/conn"
++)
++
++type testBind struct {
++	sent []byte
++}
++
++func (b *testBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
++	receive := func(bufs [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
++		copy(bufs[0], []byte{2, 9, 8, 7})
++		sizes[0] = 4
++		return 1, nil
++	}
++	return []conn.ReceiveFunc{receive}, port, nil
++}
++
++func (b *testBind) Close() error                                { return nil }
++func (b *testBind) SetMark(uint32) error                        { return nil }
++func (b *testBind) ParseEndpoint(string) (conn.Endpoint, error) { return nil, nil }
++func (b *testBind) BatchSize() int                              { return 1 }
++
++func (b *testBind) Send(bufs [][]byte, _ conn.Endpoint) error {
++	b.sent = append([]byte(nil), bufs[0]...)
++	return nil
++}
++
++func TestReservedBind(t *testing.T) {
++	base := &testBind{}
++	bind := &reservedBind{Bind: base, reserved: [3]byte{56, 127, 174}}
++
++	outbound := [][]byte{{1, 0, 0, 0, 5}}
++	if err := bind.Send(outbound, nil); err != nil {
++		t.Fatal(err)
++	}
++	if got, want := base.sent[:4], []byte{1, 56, 127, 174}; string(got) != string(want) {
++		t.Fatalf("outbound header = %v, want %v", got, want)
++	}
++
++	receive, _, err := bind.Open(0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	inbound := [][]byte{make([]byte, 4)}
++	sizes := make([]int, 1)
++	endpoints := make([]conn.Endpoint, 1)
++	if _, err = receive[0](inbound, sizes, endpoints); err != nil {
++		t.Fatal(err)
++	}
++	if got, want := inbound[0], []byte{2, 0, 0, 0}; string(got) != string(want) {
++		t.Fatalf("inbound header = %v, want %v", got, want)
++	}
++}
+diff --git a/wireguard.go b/wireguard.go
+index 3da5fa6..0000000 100644
+--- a/wireguard.go
++++ b/wireguard.go
+@@ -21,6 +21,40 @@ type DeviceSetting struct {
+ 	MTU        int
+ }
+ 
++type reservedBind struct {
++	conn.Bind
++	reserved [3]byte
++}
++
++func (b *reservedBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
++	receive, actualPort, err := b.Bind.Open(port)
++	if err != nil {
++		return nil, 0, err
++	}
++	for i, receiveFunc := range receive {
++		fn := receiveFunc
++		receive[i] = func(bufs [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
++			n, err := fn(bufs, sizes, eps)
++			for j := 0; j < n; j++ {
++				if sizes[j] >= 4 {
++					clear(bufs[j][1:4])
++				}
++			}
++			return n, err
++		}
++	}
++	return receive, actualPort, nil
++}
++
++func (b *reservedBind) Send(bufs [][]byte, endpoint conn.Endpoint) error {
++	for _, buf := range bufs {
++		if len(buf) >= 4 {
++			copy(buf[1:4], b.reserved[:])
++		}
++	}
++	return b.Bind.Send(bufs, endpoint)
++}
++
+ // CreateIPCRequest serialize the config into an IPC request and DeviceSetting
+ func CreateIPCRequest(conf *DeviceConfig) (*DeviceSetting, error) {
+ 	var request bytes.Buffer
+@@ -71,7 +105,8 @@ func StartWireguard(conf *Configuration, logLevel int) (*VirtualTun, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(logLevel, ""))
++	bind := &reservedBind{Bind: conn.NewDefaultBind(), reserved: deviceConf.Reserved}
++	dev := device.NewDevice(tun, bind, device.NewLogger(logLevel, ""))
+ 	err = dev.IpcSet(setting.IpcRequest)
+ 	if err != nil {
+ 		return nil, err

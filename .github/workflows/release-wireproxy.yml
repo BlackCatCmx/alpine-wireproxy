@@ -1,0 +1,31 @@
+name: Release WARP-compatible WireProxy
+
+on:
+  push:
+    tags:
+      - wireproxy-warp-v*
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.0
+      - name: Build and test WireProxy
+        run: |
+          git clone https://github.com/pufferffish/wireproxy.git /tmp/wireproxy
+          git -C /tmp/wireproxy checkout 9cfcf43cd0aa09479624df0f54fd9e37b7705cfb
+          git -C /tmp/wireproxy apply "$GITHUB_WORKSPACE/patches/wireproxy-warp-reserved.patch"
+          cd /tmp/wireproxy
+          go test ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o wireproxy ./cmd/wireproxy
+          tar -czf "$GITHUB_WORKSPACE/wireproxy_linux_amd64.tar.gz" wireproxy
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" wireproxy_linux_amd64.tar.gz --title "$GITHUB_REF_NAME" --generate-notes

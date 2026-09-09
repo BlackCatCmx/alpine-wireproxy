@@ -3,8 +3,8 @@
 set -eu
 
 SCRIPT_NAME=${0##*/}
-WIREPROXY_VERSION=${WIREPROXY_VERSION:-1.1.1}
-WIREPROXY_ARCHIVE_URL=${WIREPROXY_ARCHIVE_URL:-https://github.com/pufferffish/wireproxy/releases/download/v${WIREPROXY_VERSION}/wireproxy_linux_amd64.tar.gz}
+WIREPROXY_VERSION=${WIREPROXY_VERSION:-1.1.1-r1}
+WIREPROXY_ARCHIVE_URL=${WIREPROXY_ARCHIVE_URL:-https://github.com/BlackCatCmx/alpine-wireproxy/releases/download/wireproxy-warp-v${WIREPROXY_VERSION}/wireproxy_linux_amd64.tar.gz}
 STATE_DIR=/etc/wireproxy-warp
 CONFIG_FILE=$STATE_DIR/proxy.conf
 ACCOUNT_FILE=$STATE_DIR/account.json
@@ -75,6 +75,7 @@ require_alpine_openrc() {
     command -v rc-service >/dev/null 2>&1 || die "OpenRC rc-service was not found"
     command -v rc-update >/dev/null 2>&1 || die "OpenRC rc-update was not found"
     command -v supervise-daemon >/dev/null 2>&1 || die "OpenRC supervise-daemon was not found"
+    command -v ip >/dev/null 2>&1 || die "the ip command was not found"
 }
 
 validate_port() {
@@ -197,17 +198,46 @@ EOF
         sed -n '1,40p' "$account_file" >&2
         die "Cloudflare returned an unexpected registration response"
     }
+
+    device_id=$(sed -n 's/^[[:space:]]*{[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$account_file" | head -n 1)
+    access_token=$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$account_file" | head -n 1)
+    [ -n "$device_id" ] && [ -n "$access_token" ] ||
+        die "Cloudflare registration response has no device credentials"
+
+    activated_file=$TMP_DIR/activated.json
+    if ! curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 8 --max-time 30 \
+        -X PATCH \
+        -A 'okhttp/3.12.1' \
+        -H 'CF-Client-Version: a-6.10-2158' \
+        -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $access_token" \
+        --data-binary '{"warp_enabled":true}' \
+        -o "$activated_file" \
+        "https://api.cloudflareclient.com/v0a2158/reg/$device_id"; then
+        die "failed to enable the registered Cloudflare WARP device"
+    fi
+
+    grep -q '"warp_enabled"[[:space:]]*:[[:space:]]*true' "$activated_file" || {
+        sed -n '1,40p' "$activated_file" >&2
+        die "Cloudflare did not enable the registered WARP device"
+    }
+    grep -q '"account"' "$activated_file" && grep -q '"config"' "$activated_file" ||
+        die "Cloudflare returned an incomplete WARP activation response"
+    mv "$activated_file" "$account_file"
 }
 
 extract_account_values() {
     ADDRESS4=$(sed -n 's/.*"v4"[[:space:]]*:[[:space:]]*"\(172\.[^"]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
     ADDRESS6=$(sed -n 's/.*"v6"[[:space:]]*:[[:space:]]*"\(2606:[^"]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
     PEER_PUBLIC_KEY=$(sed -n 's/.*"public_key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
+    CLIENT_ID=$(sed -n 's/.*"client_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ACCOUNT_FILE" | head -n 1)
     ENDPOINT4=$(sed -n 's/.*"endpoint"[[:space:]]*:[[:space:]]*{[^}]*"v4"[[:space:]]*:[[:space:]]*"\([0-9.]*\):[0-9]*".*/\1:2408/p' "$ACCOUNT_FILE" | head -n 1)
     ENDPOINT6=$(sed -n 's/.*"endpoint"[[:space:]]*:[[:space:]]*{[^}]*"v6"[[:space:]]*:[[:space:]]*"\[\([^]]*\)\]:[0-9]*".*/[\1]:2408/p' "$ACCOUNT_FILE" | head -n 1)
 
     [ -n "$ADDRESS4" ] || die "registration response has no WARP IPv4 address"
     [ -n "$PEER_PUBLIC_KEY" ] || die "registration response has no WARP peer key"
+    client_id_size=$(printf '%s' "$CLIENT_ID" | base64 -d 2>/dev/null | wc -c | tr -d ' ')
+    [ "$client_id_size" = 3 ] || die "registration response has an invalid WARP client ID"
     [ -n "$ENDPOINT4" ] || die "registration response has no IPv4 endpoint"
 
     if [ "$STACK" = dual ] && [ -z "$ADDRESS6" ]; then
@@ -298,6 +328,11 @@ load_account_endpoints() {
     ENDPOINT4=$(sed -n 's/.*"endpoint"[[:space:]]*:[[:space:]]*{[^}]*"v4"[[:space:]]*:[[:space:]]*"\([0-9.]*\):[0-9]*".*/\1:2408/p' "$ACCOUNT_FILE" | head -n 1)
     ENDPOINT6=$(sed -n 's/.*"endpoint"[[:space:]]*:[[:space:]]*{[^}]*"v6"[[:space:]]*:[[:space:]]*"\[\([^]]*\)\]:[0-9]*".*/[\1]:2408/p' "$ACCOUNT_FILE" | head -n 1)
     [ -n "$ENDPOINT4" ] || die "WARP account has no IPv4 endpoint"
+    if [ -n "$ENDPOINT6" ]; then
+        endpoint6_address=${ENDPOINT6#\[}
+        endpoint6_address=${endpoint6_address%%\]*}
+        ip -6 route get "$endpoint6_address" >/dev/null 2>&1 || ENDPOINT6=
+    fi
 }
 
 write_selection_status() {
@@ -344,6 +379,12 @@ run_endpoint_selection() {
         [ "$round" -gt "$SELECT_ROUNDS" ] || sleep "$SELECT_RETRY_DELAY"
     done
 
+    current_endpoint=$(sed -n 's/^Endpoint[[:space:]]*=[[:space:]]*//p' "$CONFIG_FILE" | head -n 1)
+    if [ "$current_endpoint" != "$ENDPOINT4" ]; then
+        set_peer_endpoint "$ENDPOINT4"
+        rc-service "$SERVICE_NAME" restart >/dev/null 2>&1 ||
+            die "failed to restore the IPv4 WARP endpoint"
+    fi
     write_selection_status "failed after=$SELECT_ROUNDS-rounds; run 'warp retry' to try again"
     exit 0
 }
@@ -397,7 +438,7 @@ write_config() {
         else
             printf 'Address = %s/32\n' "$ADDRESS4"
         fi
-        printf 'MTU = 1280\nPrivateKey = %s\n' "$PRIVATE_KEY"
+        printf 'MTU = 1280\nPrivateKey = %s\nReserved = %s\n' "$PRIVATE_KEY" "$CLIENT_ID"
         if [ "$DNS_MODE" = cloudflare ]; then
             printf 'DNS = %s\n' "$DNS_ADDRESS"
         fi
