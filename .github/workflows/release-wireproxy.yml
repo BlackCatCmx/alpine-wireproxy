@@ -18,12 +18,12 @@ jobs:
           go-version: 1.26.0
       - name: Build and test WireProxy
         run: |
-          git clone https://github.com/pufferffish/wireproxy.git /tmp/wireproxy
-          git -C /tmp/wireproxy checkout 9cfcf43cd0aa09479624df0f54fd9e37b7705cfb
+          git clone https://github.com/windtf/wireproxy.git /tmp/wireproxy
+          git -C /tmp/wireproxy checkout 31a9a34498267d7fb8aeff05aba79d929b15eb39
           git -C /tmp/wireproxy apply "$GITHUB_WORKSPACE/patches/wireproxy-warp-reserved.patch"
           cd /tmp/wireproxy
           go test ./...
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o wireproxy ./cmd/wireproxy
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME#wireproxy-warp-v}" -o wireproxy ./cmd/wireproxy
           tar -czf "$GITHUB_WORKSPACE/wireproxy_linux_amd64.tar.gz" wireproxy
       - name: Publish release
         env:

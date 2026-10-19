@@ -3,7 +3,7 @@
 set -eu
 
 SCRIPT_NAME=${0##*/}
-WIREPROXY_VERSION=${WIREPROXY_VERSION:-1.1.1-r1}
+WIREPROXY_VERSION=${WIREPROXY_VERSION:-1.1.3-r1}
 WIREPROXY_ARCHIVE_URL=${WIREPROXY_ARCHIVE_URL:-https://github.com/BlackCatCmx/alpine-wireproxy/releases/download/wireproxy-warp-v${WIREPROXY_VERSION}/wireproxy_linux_amd64.tar.gz}
 STATE_DIR=/etc/wireproxy-warp
 CONFIG_FILE=$STATE_DIR/proxy.conf

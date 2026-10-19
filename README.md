@@ -4,6 +4,8 @@
 
 支持 Alpine Linux、OpenRC、amd64；默认监听 `0.0.0.0`，鉴权始终必填。
 
+当前使用上游 [WireProxy 1.1.3](https://github.com/windtf/wireproxy/releases/tag/v1.1.3)，保留 WARP `Reserved/client_id` 握手补丁，发布版本为 `1.1.3-r1`。
+
 ## 安装
 
 安装前无需预置脚本，下面的一行命令会从仓库下载当前脚本并立即执行：
