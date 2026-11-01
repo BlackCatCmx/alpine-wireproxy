@@ -2,9 +2,9 @@
 
 面向 64 MiB Alpine NAT VPS 的轻量 WARP SOCKS5 出站代理。只运行 WireProxy 用户态 WireGuard，不接管主机全局路由、防火墙或 DNS。默认使用 WireProxy 内部的 Cloudflare DNS `1.1.1.1`，也可以切换为容器或主机原生 DNS。
 
-支持 Alpine Linux、OpenRC、amd64；默认监听 `0.0.0.0`，鉴权始终必填。
+支持 Alpine Linux、OpenRC、amd64 和 arm64（aarch64）；安装器自动选择对应架构的二进制。默认监听 `0.0.0.0`，鉴权始终必填。
 
-当前使用上游 [WireProxy 1.1.3](https://github.com/windtf/wireproxy/releases/tag/v1.1.3)，保留 WARP `Reserved/client_id` 握手补丁，发布版本为 `1.1.3-r1`。
+当前使用上游 [WireProxy 1.1.3](https://github.com/windtf/wireproxy/releases/tag/v1.1.3)，保留 WARP `Reserved/client_id` 握手补丁，发布版本为 `1.1.3-r2`。
 
 ## 安装
 

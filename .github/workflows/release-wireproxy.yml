@@ -23,9 +23,11 @@ jobs:
           git -C /tmp/wireproxy apply "$GITHUB_WORKSPACE/patches/wireproxy-warp-reserved.patch"
           cd /tmp/wireproxy
           go test ./...
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME#wireproxy-warp-v}" -o wireproxy ./cmd/wireproxy
-          tar -czf "$GITHUB_WORKSPACE/wireproxy_linux_amd64.tar.gz" wireproxy
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME#wireproxy-warp-v}" -o wireproxy ./cmd/wireproxy
+            tar -czf "$GITHUB_WORKSPACE/wireproxy_linux_${arch}.tar.gz" wireproxy
+          done
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" wireproxy_linux_amd64.tar.gz --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" wireproxy_linux_amd64.tar.gz wireproxy_linux_arm64.tar.gz --title "$GITHUB_REF_NAME" --generate-notes

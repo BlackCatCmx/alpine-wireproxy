@@ -3,8 +3,7 @@
 set -eu
 
 SCRIPT_NAME=${0##*/}
-WIREPROXY_VERSION=${WIREPROXY_VERSION:-1.1.3-r1}
-WIREPROXY_ARCHIVE_URL=${WIREPROXY_ARCHIVE_URL:-https://github.com/BlackCatCmx/alpine-wireproxy/releases/download/wireproxy-warp-v${WIREPROXY_VERSION}/wireproxy_linux_amd64.tar.gz}
+WIREPROXY_VERSION=${WIREPROXY_VERSION:-1.1.3-r2}
 STATE_DIR=/etc/wireproxy-warp
 CONFIG_FILE=$STATE_DIR/proxy.conf
 ACCOUNT_FILE=$STATE_DIR/account.json
@@ -61,7 +60,7 @@ Install options:
                        DNS mode (default: cloudflare / $DNS_ADDRESS)
 
 The proxy listens on 0.0.0.0 by design. Username and password are mandatory.
-Only amd64 Alpine Linux with OpenRC is supported by this installer.
+Only amd64 and arm64 Alpine Linux with OpenRC are supported by this installer.
 EOF
 }
 
@@ -71,7 +70,11 @@ require_root() {
 
 require_alpine_openrc() {
     [ -r /etc/alpine-release ] || die "this installer supports Alpine Linux only"
-    [ "$(uname -m)" = x86_64 ] || die "this installer supports amd64 only"
+    case "$(uname -m)" in
+        x86_64) WIREPROXY_ARCH=amd64 ;;
+        aarch64) WIREPROXY_ARCH=arm64 ;;
+        *) die "this installer supports amd64 and arm64 only" ;;
+    esac
     command -v rc-service >/dev/null 2>&1 || die "OpenRC rc-service was not found"
     command -v rc-update >/dev/null 2>&1 || die "OpenRC rc-update was not found"
     command -v supervise-daemon >/dev/null 2>&1 || die "OpenRC supervise-daemon was not found"
@@ -417,8 +420,9 @@ start_endpoint_selection() {
 
 download_wireproxy() {
     archive=$TMP_DIR/wireproxy.tar.gz
+    archive_url=${WIREPROXY_ARCHIVE_URL:-https://github.com/BlackCatCmx/alpine-wireproxy/releases/download/wireproxy-warp-v${WIREPROXY_VERSION}/wireproxy_linux_${WIREPROXY_ARCH}.tar.gz}
     curl -fL --retry 2 --retry-delay 1 --connect-timeout 8 --max-time 60 \
-        -o "$archive" "$WIREPROXY_ARCHIVE_URL" ||
+        -o "$archive" "$archive_url" ||
         die "failed to download WireProxy $WIREPROXY_VERSION"
 
     mkdir "$TMP_DIR/extracted"
